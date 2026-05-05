@@ -1,144 +1,129 @@
+
 # 🧬 Hermes Agent Skill Lifecycle Manager
+> Solving the systemic "create-but-not-maintain" problem of the Hermes Agent Skill System
 
-> 解决 Hermes Agent 技能系统"只生不养"的系统性问题
-
-## 问题背景
-
-Hermes Agent 的 Skill 系统存在以下核心问题：
-
+## Problem Background
+The Hermes Agent Skill system has the following core pain points:
 ```
-┌─────────────────────────────────────────────────────────┐
-│                   当前 Skill 生态现状                      
-├─────────────────────────────────────────────────────────
-│  ❌ 技能只增不减 — 没有淘汰机制                             
-│  ❌ 无使用追踪 — 不知道哪些技能有用                          
-│  ❌ 无冲突检测 — 功能重叠的技能互相争抢                       
-│  ❌ 无健康评估 — 坏掉的技能照样被加载                      
-│  ❌ 无分层管理 — 89个技能平铺，核心技能被淹没              
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│                    Current Skill Ecosystem Status                  
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────|
+│  ❌ Uncontrolled skill growth - No deprecation mechanism
+│  ❌ No usage tracking - No visibility into which skills are actually useful
+│  ❌ No conflict detection - Overlapping skills compete for triggering
+│  ❌ No health assessment - Broken skills are still loaded
+│  ❌ No tiered management - 89 flat-listed skills drown out core ones
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 解决方案架构
-
+## Solution Architecture
 ```
 ┌──────────────────────────────────────────────────────────────┐
 │                    Skill Lifecycle Manager                      
-├──────────┬──────────┬──────────┬──────────┬──────────────────
+├──────────┬──────────┬──────────┬──────────┬──────────────────┤
 │ Registry │ Conflict │  Usage   │  Auto    │   Web Dashboard  
-│  Engine  │ Detector │ Tracker  │  Pruner  │   (可选)         
-├──────────┴──────────┴──────────┴──────────┴──────────────────
-│                    SQLite 数据层                               
-├──────────────────────────────────────────────────────────────
-│              ~/.hermes/skills/ 文件系统                        
+│  Engine  │ Detector │ Tracker  │  Pruner  │   (Optional)         
+├──────────┴──────────┴──────────┴──────────┴──────────────────┤
+│                    SQLite Data Layer                               
+├──────────────────────────────────────────────────────────────┤
+│              ~/.hermes/skills/ File System                        
 └──────────────────────────────────────────────────────────────┘
 ```
 
-## 核心功能
+## Core Features
+### 1. Skill Health Scoring
+Calculates a health score (0-100) for each skill based on multi-dimensional metrics:
 
-### 1. 技能健康度评分 (Skill Health Scoring)
+| Indicator | Weight | Description |
+|-----------|--------|-------------|
+| Usage Frequency | 30% | Number of invocations in the last 30 days |
+| Success Rate | 25% | Ratio of successful invocations to total invocations |
+| Freshness | 20% | Days since the last usage |
+| Dependency Level | 15% | Number of references from other skills |
+| Documentation Completeness | 10% | Frontmatter field integrity and document length |
 
-基于多维度指标计算每个技能的健康分（0-100）：
-
-| 指标 | 权重 | 说明 |
-|------|------|------|
-| 使用频率 | 30% | 最近30天被调用的次数 |
-| 成功率 | 25% | 调用成功/总调用比 |
-| 新鲜度 | 20% | 最后一次使用距今天数 |
-| 依赖度 | 15% | 被其他技能引用的次数 |
-| 文档完整度 | 10% | frontmatter 字段完整性和文档长度 |
-
-### 2. 技能分层 (Skill Tiering)
-
+### 2. Skill Tiering
 ```
 ┌─────────────┐
-│  核心技能    │ ← 健康分 ≥ 80，高频使用
-│  (Core)     │
+│  Core Skills    │ ← Health score ≥ 80, high-frequency usage
+│               
 ├─────────────┤
-│  候选技能    │ ← 健康分 60-79，有潜力
-│ (Candidate) │
+│  Candidate Skills │ ← Health score 60-79, high potential
+│               
 ├─────────────┤
-│  观察技能    │ ← 健康分 40-59，需要关注
-│ (Watch)     │
+│  Watch List Skills │ ← Health score 40-59, requires attention
+│               
 ├─────────────┤
-│  待淘汰技能  │ ← 健康分 < 40，建议清理
-│(Deprecated) │
+│  Deprecated Skills  │ ← Health score < 40, recommended for cleanup
+│               
 └─────────────┘
 ```
 
-### 3. 冲突检测 (Conflict Detection)
+### 3. Conflict Detection
+- **Name Similarity**: Detects similar naming via Levenshtein distance
+- **Description Overlap**: Detects functional duplication via TF-IDF cosine similarity
+- **Tag Collision**: Detects Jaccard similarity of tag sets
+- **Trigger Word Conflict**: Detects keyword overlap in the When to Use section
 
-- **名称相似度**：Levenshtein 距离检测相似命名
-- **描述重叠度**：TF-IDF 余弦相似度检测功能重复
-- **标签碰撞**：检测 tag 集合的 Jaccard 相似度
-- **触发词冲突**：检测 When to Use 部分的关键词重叠
+### 4. Usage Tracking
+- SQLite storage for every skill invocation event
+- Aggregated statistics: daily/weekly/monthly dimensions
+- Trend analysis: identify rising/falling usage trends
 
-### 4. 使用追踪 (Usage Tracking)
+### 5. Auto Pruning
+- Configurable thresholds (days, failure rate, etc.)
+- Dry-run mode: report only without execution
+- Safety confirmation: secondary confirmation required for high-risk operations
 
-- SQLite 存储每次技能调用事件
-- 统计聚合：日/周/月维度
-- 趋势分析：识别上升/下降趋势
-
-### 5. 自动清理 (Auto Pruning)
-
-- 可配置的阈值（天数、失败率等）
-- Dry-run 模式：只报告不执行
-- 安全确认：高危操作需二次确认
-
-## 快速开始
-
-### 安装
-
+## Quick Start
+### Installation
 ```bash
 git clone https://github.com/cheng2510/hermes-skill-lifecycle.git
 cd hermes-skill-lifecycle
 pip install -r requirements.txt
 ```
 
-### 使用
-
+### Usage
 ```bash
-# 扫描所有技能，生成健康报告
+# Scan all skills and generate a health report
 python -m src.cli scan
 
-# 查看冲突检测结果
+# View conflict detection results
 python -m src.cli conflicts
 
-# 查看使用统计
+# View usage statistics
 python -m src.cli stats
 
-# 生成清理建议（dry-run）
+# Generate cleanup recommendations (dry-run)
 python -m src.cli prune --dry-run
 
-# 启动 Web 仪表盘
+# Launch the web dashboard
 python -m src.web_dashboard
 ```
 
-### 集成到 Hermes Agent
-
-将以下代码加入你的 Hermes Agent 配置：
-
+### Integration with Hermes Agent
+Add the following code to your Hermes Agent configuration:
 ```python
-# 在 skill_manage 后自动触发健康检查
+# Auto-trigger health check after skill_manage
 from src.skill_registry import SkillRegistry
 registry = SkillRegistry()
 registry.scan_all()
 registry.generate_report()
 ```
 
-## 项目结构
-
+## Project Structure
 ```
 hermes-skill-lifecycle/
-├── README.md                 # 本文件
-├── requirements.txt          # Python 依赖
+├── README.md                 # This document
+├── requirements.txt          # Python dependencies
 ├── src/
 │   ├── __init__.py
-│   ├── cli.py               # CLI 入口
-│   ├── skill_registry.py    # 核心注册表 + 健康评分
-│   ├── conflict_detector.py # 冲突检测引擎
-│   ├── usage_tracker.py     # 使用追踪 + SQLite
-│   ├── auto_pruner.py       # 自动清理建议
-│   └── web_dashboard.py     # Web 仪表盘（可选）
+│   ├── cli.py               # CLI entry point
+│   ├── skill_registry.py    # Core registry + health scoring
+│   ├── conflict_detector.py # Conflict detection engine
+│   ├── usage_tracker.py     # Usage tracking + SQLite
+│   ├── auto_pruner.py       # Auto cleanup recommendations
+│   └── web_dashboard.py     # Web dashboard (Optional)
 ├── tests/
 │   ├── __init__.py
 │   ├── test_registry.py
@@ -149,23 +134,19 @@ hermes-skill-lifecycle/
         └── ci.yml           # GitHub Actions CI
 ```
 
-## 设计理念
+## Design Philosophy
+This project draws inspiration from the following mature solutions:
+- **tech-leads-club/agent-skills** (2.3k⭐): Lock file mechanism + CI validation
+- **NousResearch/hermes-agent-self-evolution** (2.7k⭐): Evolutionary optimization
+- **rscheiwe/open-skills**: Full lifecycle management
+- **Dicklesworthstone/meta_skill**: Multi-armed bandit algorithm for optimized skill recommendation
+- **IBM/mcp-context-forge**: Enterprise-grade registry pattern
 
-本项目参考了以下成熟方案：
-
-- **tech-leads-club/agent-skills** (2.3k⭐)：锁文件机制 + CI 验证
-- **NousResearch/hermes-agent-self-evolution** (2.7k⭐)：进化式优化
-- **rscheiwe/open-skills**：全生命周期管理
-- **Dicklesworthstone/meta_skill**：多臂老虎机算法优化技能推荐
-- **IBM/mcp-context-forge**：企业级注册表模式
-
-但不是照搬，而是因地制宜：
-
-1. **不引入外部依赖**：不强制安装 DSPy/GEPA，用纯 Python 实现
-2. **兼容现有格式**：直接读取 Hermes 的 SKILL.md frontmatter
-3. **渐进式采用**：可以只用扫描功能，不强制启用自动清理
-4. **本地优先**：所有数据存储在本地 SQLite，不上传云端
+Instead of direct replication, we tailored the solution with these core principles:
+1. **No external dependencies**: No mandatory DSPy/GEPA installation, implemented in pure Python
+2. **Native format compatibility**: Directly reads Hermes SKILL.md frontmatter
+3. **Progressive adoption**: Can use only the scan function, no mandatory auto-pruning enablement
+4. **Local-first**: All data stored in local SQLite, no cloud uploads
 
 ## License
-
 MIT
