@@ -5,13 +5,13 @@ Web 仪表盘（可选）
 访问：http://localhost:5555
 """
 
+import sys
+
 try:
     from flask import Flask, jsonify, render_template_string
 except ImportError:
     print("[!] 需要安装 flask: pip install flask")
     sys.exit(1)
-
-import sys
 from .skill_registry import SkillRegistry
 from .conflict_detector import ConflictDetector
 from .usage_tracker import UsageTracker

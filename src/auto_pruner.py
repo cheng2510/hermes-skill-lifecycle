@@ -29,10 +29,11 @@ class AutoPruner:
     def analyze(self) -> list[PruneAction]:
         """分析并生成清理建议"""
         actions = []
+        has_usage = self.registry._has_usage_data()
 
         for skill in self.registry.skills.values():
-            # 健康度过低 → 建议淘汰
-            if skill.health_score < 30:
+            # 健康度过低 → 建议淘汰（仅在有使用数据时才建议）
+            if skill.health_score < 20 and has_usage:
                 actions.append(PruneAction(
                     skill_name=skill.name,
                     action="deprecate",
@@ -42,8 +43,8 @@ class AutoPruner:
                     related_skills=skill.related_skills,
                 ))
 
-            # 长期未使用（90天+）且无依赖 → 建议移除
-            if skill.last_used_days_ago > 90 and not self._has_dependents(skill):
+            # 长期未使用（90天+）且无依赖 → 建议移除（需要有使用数据）
+            if has_usage and skill.last_used_days_ago > 90 and not self._has_dependents(skill):
                 actions.append(PruneAction(
                     skill_name=skill.name,
                     action="remove",
@@ -54,7 +55,7 @@ class AutoPruner:
                 ))
 
             # 成功率极低 → 建议修复或移除
-            if skill.success_rate < 0.2 and skill.usage_count_30d >= 3:
+            if has_usage and skill.success_rate < 0.2 and skill.usage_count_30d >= 3:
                 actions.append(PruneAction(
                     skill_name=skill.name,
                     action="deprecate",
@@ -130,7 +131,9 @@ class AutoPruner:
         if not actions:
             lines.append("  ✅ 当前无需清理的技能")
             lines.append("=" * 60)
-            return "\n".join(lines)
+            report = "\n".join(lines)
+            print(report)
+            return report
 
         action_icons = {"deprecate": "📉", "remove": "🗑️", "merge": "🔗"}
         action_labels = {"deprecate": "淘汰", "remove": "移除", "merge": "合并"}

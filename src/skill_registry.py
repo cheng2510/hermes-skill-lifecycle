@@ -64,6 +64,16 @@ class SkillRegistry:
         self.skills_dir = Path(skills_dir or os.path.expanduser("~/.hermes/skills"))
         self.db_path = Path(db_path or os.path.expanduser("~/.hermes/skill_lifecycle.db"))
         self.skills: dict[str, SkillMeta] = {}
+        self._usage_db_exists = False
+        self._skills_with_data: set[str] = set()  # 有实际使用记录的技能
+
+    def _has_usage_data(self) -> bool:
+        """检查是否有可用的使用追踪数据"""
+        return self._usage_db_exists
+
+    def _skill_has_data(self, name: str) -> bool:
+        """检查某个技能是否有实际使用记录"""
+        return name in self._skills_with_data
 
     def scan_all(self) -> dict[str, SkillMeta]:
         """扫描所有技能目录，解析 SKILL.md"""
@@ -150,6 +160,7 @@ class SkillRegistry:
     def _load_usage_data(self):
         """从 SQLite 加载使用数据"""
         if not self.db_path.exists():
+            self._usage_db_exists = False
             return
 
         conn = sqlite3.connect(self.db_path)
@@ -159,7 +170,11 @@ class SkillRegistry:
             # 检查表是否存在
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='usage_events'")
             if not cursor.fetchone():
+                self._usage_db_exists = False
                 return
+
+            self._usage_db_exists = True
+            self._skills_with_data.clear()
 
             thirty_days_ago = (datetime.now() - timedelta(days=30)).isoformat()
 
@@ -180,6 +195,7 @@ class SkillRegistry:
                 row = cursor.fetchone()
                 if row[0] > 0:
                     skill.success_rate = row[1] / row[0]
+                    self._skills_with_data.add(skill.name)
 
                 # 最后使用时间
                 cursor.execute(
@@ -199,12 +215,17 @@ class SkillRegistry:
     def _calculate_health(self, skill: SkillMeta) -> float:
         """计算技能健康度评分（0-100）"""
         scores = {}
+        has_global_data = self._has_usage_data()
+        has_data = self._skill_has_data(skill.name)
 
         # 1. 使用频率（30天内调用次数，归一化到0-100）
-        # 0次=0, 1-5次=40, 6-20次=70, 20+=100
         count = skill.usage_count_30d
-        if count == 0:
-            scores["usage_frequency"] = 0
+        if not has_global_data:
+            scores["usage_frequency"] = 50  # 无追踪系统，中性
+        elif not has_data:
+            scores["usage_frequency"] = 30  # 有追踪但该技能无记录，轻微惩罚
+        elif count == 0:
+            scores["usage_frequency"] = 10  # 有记录但30天内0次
         elif count <= 5:
             scores["usage_frequency"] = 40
         elif count <= 20:
@@ -213,12 +234,21 @@ class SkillRegistry:
             scores["usage_frequency"] = 100
 
         # 2. 成功率
-        scores["success_rate"] = skill.success_rate * 100
+        if not has_global_data:
+            scores["success_rate"] = 50  # 无追踪系统，中性
+        elif not has_data:
+            scores["success_rate"] = 30  # 有追踪但无记录
+        else:
+            scores["success_rate"] = skill.success_rate * 100
 
         # 3. 新鲜度（越近越好）
         days = skill.last_used_days_ago
-        if days < 0:
-            scores["freshness"] = 30  # 从未使用，给个基础分
+        if not has_global_data:
+            scores["freshness"] = 50  # 无追踪系统，中性
+        elif not has_data:
+            scores["freshness"] = 30  # 有追踪但从未被记录
+        elif days < 0:
+            scores["freshness"] = 10  # 有记录但从未使用
         elif days <= 7:
             scores["freshness"] = 100
         elif days <= 30:

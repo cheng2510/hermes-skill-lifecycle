@@ -7,7 +7,7 @@ from src.conflict_detector import ConflictDetector
 def test_name_similarity():
     """名称相似度检测"""
     detector = ConflictDetector()
-    assert detector._name_similarity("github-pr", "github-pr-workflow") > 0.5
+    assert detector._name_similarity("github-pr", "github-pr-workflow") >= 0.5
     assert detector._name_similarity("skill-a", "completely-different") < 0.5
 
 

@@ -101,20 +101,37 @@ class ConflictDetector:
         if a == b:
             return 1.0
 
-        # 简化版 Levenshtein
         max_len = max(len(a), len(b))
         if max_len == 0:
             return 1.0
 
-        # 使用集合交集计算字符级相似度
-        set_a, set_b = set(a), set(b)
-        char_sim = len(set_a & set_b) / len(set_a | set_b)
+        # 真正的 Levenshtein 距离
+        dist = self._levenshtein(a, b)
+        sim = 1.0 - (dist / max_len)
 
-        # 包含关系
+        # 包含关系给高分
         if a in b or b in a:
-            char_sim = max(char_sim, 0.8)
+            shorter = min(len(a), len(b))
+            longer = max(len(a), len(b))
+            containment = shorter / longer
+            sim = max(sim, containment)
 
-        return char_sim
+        return round(sim, 4)
+
+    def _levenshtein(self, a: str, b: str) -> int:
+        """计算 Levenshtein 编辑距离"""
+        m, n = len(a), len(b)
+        # 优化：只用两行
+        if m < n:
+            return self._levenshtein(b, a)
+        prev = list(range(n + 1))
+        for i in range(1, m + 1):
+            curr = [i] + [0] * n
+            for j in range(1, n + 1):
+                cost = 0 if a[i-1] == b[j-1] else 1
+                curr[j] = min(curr[j-1] + 1, prev[j] + 1, prev[j-1] + cost)
+            prev = curr
+        return prev[n]
 
     def _text_similarity(self, a: str, b: str) -> float:
         """文本相似度（词频向量余弦相似度）"""

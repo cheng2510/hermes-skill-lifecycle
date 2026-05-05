@@ -19,6 +19,7 @@ def test_empty_prune():
 def test_prune_low_health():
     """低健康度技能清理建议"""
     registry = SkillRegistry()
+    registry._usage_db_exists = True  # 模拟有使用数据
     # 模拟一个低健康度技能
     from src.skill_registry import SkillMeta
     skill = SkillMeta(
