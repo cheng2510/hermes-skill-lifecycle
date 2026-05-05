@@ -1,3 +1,9 @@
+<div align="right">
+
+[**简体中文**](README_zh_CN.md)
+
+</div>
+
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.9+-blue?logo=python&logoColor=white" alt="Python 3.9+"/>
   <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"/>
