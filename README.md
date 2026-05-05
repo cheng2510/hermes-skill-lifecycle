@@ -148,5 +148,4 @@ Instead of direct replication, we tailored the solution with these core principl
 3. **Progressive adoption**: Can use only the scan function, no mandatory auto-pruning enablement
 4. **Local-first**: All data stored in local SQLite, no cloud uploads
 
-## License
-MIT
+
