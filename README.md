@@ -1,81 +1,113 @@
-# 🧬 Hermes Agent Skill Lifecycle Manager
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.9+-blue?logo=python&logoColor=white" alt="Python 3.9+"/>
+  <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"/>
+  <img src="https://img.shields.io/badge/Tests-15/15-brightgreen.svg" alt="Tests 15/15"/>
+  <img src="https://img.shields.io/badge/Version-1.1.0-orange.svg" alt="Version 1.1.0"/>
+</p>
 
-> 解决 Hermes Agent 技能系统"只生不养"的系统性问题
+<h1 align="center">🧬 Skill Lifecycle Manager</h1>
+<p align="center"><b>Stop hoarding dead skills. Start managing them.</b></p>
+<p align="center">A health scoring, conflict detection, and usage tracking system for <a href="https://github.com/NousResearch/hermes-agent">Hermes Agent</a> skills.</p>
 
-## 问题背景
+---
 
-Hermes Agent 的 Skill 系统存在以下核心问题：
+## The Problem
 
-| 问题 | 说明 |
-|------|------|
-| ❌ 技能只增不减 | 没有淘汰机制，技能数只增不减 |
-| ❌ 无使用追踪 | 不知道哪些技能有用、哪些是死代码 |
-| ❌ 无冲突检测 | 功能重叠的技能互相争抢 context |
-| ❌ 无健康评估 | 坏掉的技能照样被加载，浪费 token |
-| ❌ 无分层管理 | 89+ 技能平铺，核心技能被淹没 |
+Hermes Agent loads **every** skill into context on every turn. With 80+ skills, that's a lot of tokens burned on skills nobody ever uses. Worse, there's no way to know:
 
-## 解决方案
+- Which skills are actually useful vs. dead weight
+- Which skills overlap and compete for the same triggers
+- Which skills are broken and should be removed
+- Which skills matter most and deserve priority
+
+**The skill system only grows. It never prunes.**
+
+## The Solution
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                    Skill Lifecycle Manager                      │
-├──────────┬──────────┬──────────┬──────────┬──────────────────
-│ Registry │ Conflict │  Usage   │  Auto    │   CLI / Web      
-│  Engine  │ Detector │ Tracker  │  Pruner  │   Dashboard      
-├──────────┴──────────┴──────────┴──────────┴──────────────────
-│                    SQLite 数据层                               │
-├──────────────────────────────────────────────────────────────
-│              ~/.hermes/skills/ 文件系统                        │
-└──────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                   Skill Lifecycle Manager                          │
+├────────────┬────────────┬────────────┬────────────┬─────────────┤
+│  Health    │  Conflict  │   Usage    │   Auto     │    CLI &    │
+│  Scoring   │  Detector  │   Tracker  │   Pruner   │   Dashboard │
+├────────────┴────────────┴────────────┴────────────┴─────────────┤
+│                      SQLite Storage Layer                         │
+├─────────────────────────────────────────────────────────────────┤
+│                 ~/.hermes/skills/ (SKILL.md files)                │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-## 核心功能
+## Features
 
-### 1. 技能健康度评分 (Skill Health Scoring)
+### Health Scoring (0-100)
 
-多维度指标计算每个技能的健康分（0-100）：
+Every skill gets a composite health score based on five weighted dimensions:
 
-| 指标 | 权重 | 说明 |
-|------|------|------|
-| 使用频率 | 30% | 最近 30 天被调用的次数 |
-| 成功率 | 25% | 调用成功/总调用比 |
-| 新鲜度 | 20% | 最后一次使用距今天数 |
-| 依赖度 | 15% | 被其他技能引用的次数 |
-| 文档完整度 | 10% | frontmatter 字段完整性和文档长度 |
+| Dimension | Weight | What It Measures |
+|-----------|--------|------------------|
+| Usage Frequency | 30% | Calls in the last 30 days |
+| Success Rate | 25% | Successful calls / total calls |
+| Freshness | 20% | Days since last use |
+| Dependency | 15% | How many other skills reference it |
+| Documentation | 10% | Frontmatter completeness + doc length |
 
-**智能基线**：无追踪数据时给中性分（不会把新技能全标红），有追踪但无记录时轻微惩罚。
+**Smart baselines** — three tiers of data awareness:
+- No tracking system installed → neutral score (50)
+- Tracking installed but skill has no records → mild penalty (30)
+- Skill has real usage data → actual scoring
 
-### 2. 技能分层 (Skill Tiering)
+### Skill Tiering
 
-| 层级 | 分数范围 | 含义 |
-|------|----------|------|
-| 🟢 核心 (Core) | ≥ 80 | 高频使用，文档完善 |
-| 🔵 候选 (Candidate) | 60-79 | 有潜力，值得保留 |
-| 🟡 观察 (Watch) | 40-59 | 需要关注，可能需要改进文档 |
-| 🔴 待淘汰 (Deprecated) | < 40 | 建议清理 |
+```
+  ┌─────────────────────────────────────────────┐
+  │  🟢 Core        │  score ≥ 80  │  Keep      │
+  │  🔵 Candidate   │  60 – 79     │  Promising  │
+  │  🟡 Watch       │  40 – 59     │  Monitor    │
+  │  🔴 Deprecated  │  < 40        │  Prune      │
+  └─────────────────────────────────────────────┘
+```
 
-### 3. 冲突检测 (Conflict Detection)
+### Conflict Detection
 
-- **名称相似度**：Levenshtein 编辑距离（真正的编辑距离，不是字符集交集）
-- **描述重叠度**：词频向量 Jaccard 相似度
-- **标签碰撞**：Jaccard 相似度
-- **触发词冲突**：关键词重叠检测（过滤停用词）
+Four independent detection engines run in parallel:
 
-### 4. 使用追踪 (Usage Tracking)
+| Engine | Method | Catches |
+|--------|--------|---------|
+| Name Similarity | Levenshtein edit distance | `github-pr` vs `github-pr-workflow` |
+| Description Overlap | Token-level Jaccard | Two skills that do the same thing |
+| Tag Collision | Set Jaccard | `["git","pr"]` vs `["git","review"]` |
+| Trigger Word Overlap | Keyword intersection (stopwords filtered) | Competing trigger phrases |
 
-- SQLite 存储每次技能调用事件
-- 统计聚合：日/周/月维度
-- 通过 CLI 的 `record` 命令记录使用
+### Usage Tracking
 
-### 5. 自动清理 (Auto Pruning)
+```bash
+# Record a skill use
+python -m src.cli record my-skill
 
-- 基于健康度评分和使用数据生成清理建议
-- Dry-run 模式（默认）：只报告不执行
-- 无使用数据时不盲目建议删除
+# Record a failure
+python -m src.cli record my-skill --failed
 
-## 快速开始
+# View statistics
+python -m src.cli stats --days 7
+```
 
-### 安装
+All data lives in `~/.hermes/skill_lifecycle.db` (SQLite). Nothing leaves your machine.
+
+### Auto Pruning
+
+Generates cleanup suggestions without touching your files. Three action types:
+
+| Action | Meaning |
+|--------|---------|
+| 📉 Deprecate | Mark as low-priority |
+| 🗑️ Remove | Safe to delete |
+| 🔗 Merge | Two skills should become one |
+
+Dry-run by default. No data? No blind deletions.
+
+## Quick Start
+
+### Install
 
 ```bash
 git clone https://github.com/cheng2510/hermes-skill-lifecycle.git
@@ -83,67 +115,111 @@ cd hermes-skill-lifecycle
 pip install -e .
 ```
 
-### 使用
+### CLI Usage
 
 ```bash
-# 扫描所有技能，生成健康报告
+# Full health report
 python -m src.cli scan
 
-# 查看冲突检测结果
+# Conflict detection
 python -m src.cli conflicts
 
-# 查看使用统计
+# Usage statistics (last 30 days)
 python -m src.cli stats
 
-# 生成清理建议（dry-run）
+# Cleanup suggestions (dry-run)
 python -m src.cli prune
 
-# 记录一次技能使用
-python -m src.cli record my-skill
-python -m src.cli record my-skill --failed
-
-# 全部报告
+# Everything at once
 python -m src.cli all
 ```
 
-### Web 仪表盘（可选）
+### Example Output
+
+```
+============================================================
+  Hermes Agent Skill Ecosystem Health Report
+============================================================
+  Scan time: 2026-05-05 17:38:11
+  Total skills: 92
+
+  ┌─────────────┬───────┐
+  │ Tier        │ Count │
+  ├─────────────┼───────┤
+  │ 🟢 Core        │     0 │
+  │ 🔵 Candidate   │     1 │
+  │ 🟡 Watch       │    91 │
+  │ 🔴 Deprecated  │     0 │
+  └─────────────┴───────┘
+
+  Skill Health Ranking:
+  --------------------------------------------------------
+   1. [🔵 Candidate]  60.0 |████████████░░░░░░░░| test-driven-development
+   2. [🟡 Watch    ]  58.8 |███████████░░░░░░░░░| claude-design
+   3. [🟡 Watch    ]  58.0 |███████████░░░░░░░░░| excalidraw
+   4. [🟡 Watch    ]  58.0 |███████████░░░░░░░░░| writing-plans
+   ...
+```
+
+### Web Dashboard (Optional)
 
 ```bash
 pip install flask
 python -m src.web_dashboard
-# 访问 http://localhost:5555
+# → http://localhost:5555
 ```
 
-## 项目结构
+Dark-themed dashboard with real-time health cards, tier breakdowns, and conflict visualization.
+
+## Project Structure
 
 ```
 hermes-skill-lifecycle/
-├── README.md
-├── requirements.txt
-├── setup.py
 ├── src/
-│   ├── __init__.py
-│   ├── cli.py               # CLI 入口
-│   ├── skill_registry.py    # 核心注册表 + 健康评分
-│   ├── conflict_detector.py # 冲突检测引擎
-│   ├── usage_tracker.py     # 使用追踪 + SQLite
-│   ├── auto_pruner.py       # 自动清理建议
-│   └── web_dashboard.py     # Web 仪表盘
-└── tests/
-    ├── test_registry.py
-    ├── test_conflict.py
-    ├── test_pruner.py
-    └── test_tracker.py
+│   ├── cli.py               # CLI entry point
+│   ├── skill_registry.py    # Scanner + health scoring engine
+│   ├── conflict_detector.py # 4-dimension conflict detection
+│   ├── usage_tracker.py     # SQLite usage event tracker
+│   ├── auto_pruner.py       # Cleanup suggestion generator
+│   └── web_dashboard.py     # Flask web dashboard
+├── tests/
+│   ├── test_registry.py
+│   ├── test_conflict.py
+│   ├── test_pruner.py
+│   └── test_tracker.py
+├── setup.py
+├── requirements.txt
+└── README.md
 ```
 
-## 设计理念
+## Design Principles
 
-1. **不引入外部依赖**：核心只依赖 pyyaml，纯 Python 实现
-2. **兼容现有格式**：直接读取 Hermes 的 SKILL.md frontmatter
-3. **渐进式采用**：可以只用扫描功能，不强制启用自动清理
-4. **本地优先**：所有数据存储在本地 SQLite，不上传云端
-5. **智能评分**：区分"无追踪系统"、"有系统无记录"、"有实际数据"三种状态
+1. **Zero heavy dependencies** — core runs on `pyyaml` alone. No sklearn, no numpy, no jieba.
+2. **Reads native format** — parses Hermes `SKILL.md` frontmatter directly. No migration needed.
+3. **Adopt incrementally** — use `scan` alone. Never forced to enable auto-pruning.
+4. **Local-first** — all data in local SQLite. Nothing uploaded. Nothing phones home.
+5. **Smart baselines** — distinguishes "no tracker" / "tracker exists but no data" / "real data" so fresh installs don't panic.
+
+## Running Tests
+
+```bash
+pip install pytest
+python -m pytest tests/ -v
+```
+
+```
+tests/test_registry.py  ✓  5/5
+tests/test_conflict.py  ✓  4/4
+tests/test_pruner.py    ✓  2/2
+tests/test_tracker.py   ✓  4/4
+─────────────────────────────
+                        15 passed
+```
+
+## Contributing
+
+Issues and PRs welcome. This project is actively maintained — every optimization gets synced to this repo automatically.
 
 ## License
 
-MIT
+[MIT](LICENSE)
