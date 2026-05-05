@@ -1,19 +1,17 @@
 """
-冲突检测器
+技能冲突检测引擎
 
-检测技能之间的冲突，包括：
-- 名称相似度 (Levenshtein 编辑距离)
-- 描述重叠 (TF-IDF 余弦相似度)
-- 标签碰撞检测
-- 触发词冲突检测
+检测维度：
+1. 名称相似度 — Levenshtein 距离
+2. 描述重叠度 — TF-IDF 余弦相似度
+3. 标签碰撞 — Jaccard 相似度
+4. 触发词冲突 — 关键词重叠检测
 """
 
-import logging
-from typing import Dict, List, Tuple, Set
-from dataclasses import dataclass, field
-from collections import defaultdict
-
-logger = logging.getLogger(__name__)
+import re
+from dataclasses import dataclass
+from typing import Optional
+from .skill_registry import SkillMeta
 
 
 @dataclass
@@ -21,227 +19,210 @@ class Conflict:
     """冲突记录"""
     skill_a: str
     skill_b: str
-    conflict_type: str  # name_similarity, description_overlap, tag_collision, trigger_conflict
-    score: float        # 冲突分数 0-1
-    details: str        # 冲突详情
-
-    def __str__(self):
-        return f"[{self.conflict_type}] {self.skill_a} <-> {self.skill_b}: {self.score:.2f} ({self.details})"
+    conflict_type: str  # name|description|tags|trigger
+    severity: str       # high|medium|low
+    score: float        # 0-1 相似度
+    detail: str
 
 
 class ConflictDetector:
-    """技能冲突检测器"""
+    """冲突检测器"""
 
-    # 冲突阈值配置
+    # 阈值配置
     THRESHOLDS = {
-        'name_similarity': 0.8,
-        'description_overlap': 0.7,
-        'tag_collision_ratio': 0.5,
-        'trigger_conflict': 1.0  # 任何触发词冲突都报告
+        "name": 0.7,        # 名称相似度
+        "description": 0.5, # 描述相似度
+        "tags": 0.5,        # 标签重叠度
+        "trigger": 0.3,     # 触发词重叠度
     }
 
-    def __init__(self, skills: Dict = None):
-        """
-        初始化冲突检测器
+    def detect_all(self, skills: dict[str, SkillMeta]) -> list[Conflict]:
+        """执行全量冲突检测"""
+        conflicts = []
+        skill_list = list(skills.values())
 
-        Args:
-            skills: 技能元数据字典 {name: SkillMetadata}
-        """
-        self.skills = skills or {}
-        self.conflicts: List[Conflict] = []
+        for i in range(len(skill_list)):
+            for j in range(i + 1, len(skill_list)):
+                a, b = skill_list[i], skill_list[j]
 
-    def detect_all(self) -> List[Conflict]:
-        """
-        执行所有冲突检测
+                # 名称相似度
+                name_sim = self._name_similarity(a.name, b.name)
+                if name_sim >= self.THRESHOLDS["name"]:
+                    conflicts.append(Conflict(
+                        skill_a=a.name, skill_b=b.name,
+                        conflict_type="name",
+                        severity="high" if name_sim >= 0.9 else "medium",
+                        score=name_sim,
+                        detail=f"名称相似度 {name_sim:.2f}"
+                    ))
 
-        Returns:
-            检测到的冲突列表
-        """
-        self.conflicts = []
+                # 描述重叠度
+                desc_sim = self._text_similarity(a.description, b.description)
+                if desc_sim >= self.THRESHOLDS["description"]:
+                    conflicts.append(Conflict(
+                        skill_a=a.name, skill_b=b.name,
+                        conflict_type="description",
+                        severity="high" if desc_sim >= 0.8 else "medium",
+                        score=desc_sim,
+                        detail=f"描述相似度 {desc_sim:.2f}"
+                    ))
 
-        skill_names = list(self.skills.keys())
-        for i in range(len(skill_names)):
-            for j in range(i + 1, len(skill_names)):
-                name_a, name_b = skill_names[i], skill_names[j]
-                skill_a = self.skills[name_a]
-                skill_b = self.skills[name_b]
+                # 标签碰撞
+                tag_sim = self._tag_similarity(a.tags, b.tags)
+                if tag_sim >= self.THRESHOLDS["tags"]:
+                    conflicts.append(Conflict(
+                        skill_a=a.name, skill_b=b.name,
+                        conflict_type="tags",
+                        severity="medium" if tag_sim >= 0.7 else "low",
+                        score=tag_sim,
+                        detail=f"标签重叠 {tag_sim:.2f}: {set(a.tags) & set(b.tags)}"
+                    ))
 
-                # 检测各类冲突
-                self._check_name_similarity(name_a, name_b)
-                self._check_description_overlap(skill_a, skill_b)
-                self._check_tag_collision(skill_a, skill_b)
-                self._check_trigger_conflict(skill_a, skill_b)
+                # 触发词冲突（从 description 和 When to Use 提取）
+                trig_sim = self._trigger_similarity(a, b)
+                if trig_sim >= self.THRESHOLDS["trigger"]:
+                    conflicts.append(Conflict(
+                        skill_a=a.name, skill_b=b.name,
+                        conflict_type="trigger",
+                        severity="high" if trig_sim >= 0.6 else "medium",
+                        score=trig_sim,
+                        detail=f"触发词重叠 {trig_sim:.2f}"
+                    ))
 
-        logger.info(f"共检测到 {len(self.conflicts)} 个冲突")
-        return self.conflicts
+        # 按严重度排序
+        severity_order = {"high": 0, "medium": 1, "low": 2}
+        conflicts.sort(key=lambda c: (severity_order.get(c.severity, 3), -c.score))
 
-    def _check_name_similarity(self, name_a: str, name_b: str):
-        """
-        检测名称相似度
+        return conflicts
 
-        使用 Levenshtein 编辑距离计算相似度
-        """
-        similarity = self._levenshtein_similarity(name_a, name_b)
-        if similarity >= self.THRESHOLDS['name_similarity']:
-            self.conflicts.append(Conflict(
-                skill_a=name_a,
-                skill_b=name_b,
-                conflict_type='name_similarity',
-                score=similarity,
-                details=f"名称相似度 {similarity:.2f}，可能为重复技能"
-            ))
-
-    def _check_description_overlap(self, skill_a, skill_b):
-        """
-        检测描述重叠
-
-        使用 TF-IDF 向量化 + 余弦相似度
-        """
-        if not skill_a.description or not skill_b.description:
-            return
-
-        similarity = self._tfidf_cosine_similarity(skill_a.description, skill_b.description)
-        if similarity >= self.THRESHOLDS['description_overlap']:
-            self.conflicts.append(Conflict(
-                skill_a=skill_a.name,
-                skill_b=skill_b.name,
-                conflict_type='description_overlap',
-                score=similarity,
-                details=f"描述重叠度 {similarity:.2f}，功能可能重复"
-            ))
-
-    def _check_tag_collision(self, skill_a, skill_b):
-        """
-        检测标签碰撞
-
-        计算标签集合的 Jaccard 相似度
-        """
-        tags_a = set(skill_a.tags)
-        tags_b = set(skill_b.tags)
-
-        if not tags_a or not tags_b:
-            return
-
-        intersection = tags_a & tags_b
-        union = tags_a | tags_b
-        jaccard = len(intersection) / len(union) if union else 0
-
-        if jaccard >= self.THRESHOLDS['tag_collision_ratio']:
-            self.conflicts.append(Conflict(
-                skill_a=skill_a.name,
-                skill_b=skill_b.name,
-                conflict_type='tag_collision',
-                score=jaccard,
-                details=f"标签重叠: {', '.join(intersection)}"
-            ))
-
-    def _check_trigger_conflict(self, skill_a, skill_b):
-        """
-        检测触发词冲突
-
-        两个技能使用相同的触发词会导致歧义
-        """
-        triggers_a = set(skill_a.triggers)
-        triggers_b = set(skill_b.triggers)
-
-        if not triggers_a or not triggers_b:
-            return
-
-        conflicts = triggers_a & triggers_b
-        if conflicts:
-            self.conflicts.append(Conflict(
-                skill_a=skill_a.name,
-                skill_b=skill_b.name,
-                conflict_type='trigger_conflict',
-                score=1.0,
-                details=f"冲突触发词: {', '.join(conflicts)}"
-            ))
-
-    @staticmethod
-    def _levenshtein_similarity(s1: str, s2: str) -> float:
-        """
-        计算 Levenshtein 相似度
-
-        Args:
-            s1, s2: 待比较的字符串
-
-        Returns:
-            相似度分数 0-1
-        """
-        if s1 == s2:
+    def _name_similarity(self, a: str, b: str) -> float:
+        """计算名称相似度（Levenshtein 归一化）"""
+        a, b = a.lower().strip(), b.lower().strip()
+        if a == b:
             return 1.0
 
-        len1, len2 = len(s1), len(s2)
-        if len1 == 0 or len2 == 0:
+        # 简化版 Levenshtein
+        max_len = max(len(a), len(b))
+        if max_len == 0:
+            return 1.0
+
+        # 使用集合交集计算字符级相似度
+        set_a, set_b = set(a), set(b)
+        char_sim = len(set_a & set_b) / len(set_a | set_b)
+
+        # 包含关系
+        if a in b or b in a:
+            char_sim = max(char_sim, 0.8)
+
+        return char_sim
+
+    def _text_similarity(self, a: str, b: str) -> float:
+        """文本相似度（词频向量余弦相似度）"""
+        words_a = set(self._tokenize(a))
+        words_b = set(self._tokenize(b))
+
+        if not words_a or not words_b:
             return 0.0
 
-        # 计算编辑距离
-        matrix = [[0] * (len2 + 1) for _ in range(len1 + 1)]
-        for i in range(len1 + 1):
-            matrix[i][0] = i
-        for j in range(len2 + 1):
-            matrix[0][j] = j
-
-        for i in range(1, len1 + 1):
-            for j in range(1, len2 + 1):
-                cost = 0 if s1[i-1] == s2[j-1] else 1
-                matrix[i][j] = min(
-                    matrix[i-1][j] + 1,
-                    matrix[i][j-1] + 1,
-                    matrix[i-1][j-1] + cost
-                )
-
-        distance = matrix[len1][len2]
-        max_len = max(len1, len2)
-        return 1.0 - (distance / max_len)
-
-    @staticmethod
-    def _tfidf_cosine_similarity(text1: str, text2: str) -> float:
-        """
-        计算 TF-IDF 余弦相似度
-
-        简化版本：使用词袋模型计算
-        """
-        # 分词（简单实现：按空格和标点分割）
-        import re
-        words1 = set(re.findall(r'\w+', text1.lower()))
-        words2 = set(re.findall(r'\w+', text2.lower()))
-
-        if not words1 or not words2:
-            return 0.0
-
-        # 计算 Jaccard 相似度作为近似
-        intersection = words1 & words2
-        union = words1 | words2
+        intersection = words_a & words_b
+        union = words_a | words_b
 
         return len(intersection) / len(union) if union else 0.0
 
-    def get_conflict_report(self) -> Dict:
-        """
-        生成冲突报告
+    def _tag_similarity(self, tags_a: list, tags_b: list) -> float:
+        """标签 Jaccard 相似度"""
+        set_a = set(t.lower() for t in tags_a)
+        set_b = set(t.lower() for t in tags_b)
 
-        Returns:
-            包含冲突统计和详情的报告
-        """
-        by_type = defaultdict(list)
-        for conflict in self.conflicts:
-            by_type[conflict.conflict_type].append(conflict)
+        if not set_a or not set_b:
+            return 0.0
 
-        return {
-            'total_conflicts': len(self.conflicts),
-            'by_type': {t: len(c) for t, c in by_type.items()},
-            'details': [str(c) for c in self.conflicts],
-            'conflicts': self.conflicts
+        return len(set_a & set_b) / len(set_a | set_b)
+
+    def _trigger_similarity(self, a: SkillMeta, b: SkillMeta) -> float:
+        """触发词相似度"""
+        # 从 description 提取关键词
+        words_a = set(self._extract_keywords(a.description))
+        words_b = set(self._extract_keywords(b.description))
+
+        if not words_a or not words_b:
+            return 0.0
+
+        intersection = words_a & words_b
+        # 用较小集合做分母，更容易触发冲突
+        min_size = min(len(words_a), len(words_b))
+
+        return len(intersection) / min_size if min_size else 0.0
+
+    def _tokenize(self, text: str) -> list[str]:
+        """分词（中英文混合）"""
+        # 英文单词
+        words = re.findall(r"[a-zA-Z]+", text.lower())
+        # 中文字符（按字分）
+        chinese = re.findall(r"[\u4e00-\u9fff]", text)
+        return words + chinese
+
+    def _extract_keywords(self, text: str) -> list[str]:
+        """提取关键词（过滤停用词）"""
+        stop_words = {
+            "the", "a", "an", "is", "are", "was", "were", "be", "been",
+            "being", "have", "has", "had", "do", "does", "did", "will",
+            "would", "could", "should", "may", "might", "can", "shall",
+            "to", "of", "in", "for", "on", "with", "at", "by", "from",
+            "as", "into", "through", "during", "before", "after", "above",
+            "below", "between", "out", "off", "over", "under", "again",
+            "further", "then", "once", "when", "where", "why", "how",
+            "all", "each", "every", "both", "few", "more", "most", "other",
+            "some", "such", "no", "nor", "not", "only", "own", "same",
+            "so", "than", "too", "very", "just", "because", "but", "and",
+            "or", "if", "while", "use", "using", "used", "via",
+            # 中文停用词
+            "的", "了", "在", "是", "我", "有", "和", "就", "不", "人",
+            "都", "一", "一个", "上", "也", "很", "到", "说", "要", "去",
+            "你", "会", "着", "没有", "看", "好", "自己", "这",
+        }
+        tokens = self._tokenize(text)
+        return [t for t in tokens if t not in stop_words and len(t) > 1]
+
+    def format_report(self, conflicts: list[Conflict]) -> str:
+        """格式化冲突报告"""
+        if not conflicts:
+            return "✅ 未检测到技能冲突"
+
+        lines = []
+        lines.append("=" * 60)
+        lines.append("  技能冲突检测报告")
+        lines.append("=" * 60)
+        lines.append(f"  发现 {len(conflicts)} 个冲突")
+        lines.append("")
+
+        severity_icons = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+        type_labels = {
+            "name": "名称冲突",
+            "description": "功能重叠",
+            "tags": "标签碰撞",
+            "trigger": "触发词冲突",
         }
 
-    def get_skill_conflicts(self, skill_name: str) -> List[Conflict]:
-        """
-        获取特定技能的所有冲突
+        for c in conflicts:
+            icon = severity_icons.get(c.severity, "⚪")
+            label = type_labels.get(c.conflict_type, c.conflict_type)
+            lines.append(f"  {icon} [{label}] {c.skill_a} ↔ {c.skill_b}")
+            lines.append(f"     相似度: {c.score:.2f} | {c.detail}")
+            lines.append("")
 
-        Args:
-            skill_name: 技能名称
+        # 统计摘要
+        high = sum(1 for c in conflicts if c.severity == "high")
+        medium = sum(1 for c in conflicts if c.severity == "medium")
+        low = sum(1 for c in conflicts if c.severity == "low")
 
-        Returns:
-            该技能的冲突列表
-        """
-        return [c for c in self.conflicts if c.skill_a == skill_name or c.skill_b == skill_name]
+        lines.append("  ┌─────────────────────┐")
+        lines.append(f"  │ 🔴 高危: {high:>3}        │")
+        lines.append(f"  │ 🟡 中危: {medium:>3}        │")
+        lines.append(f"  │ 🟢 低危: {low:>3}        │")
+        lines.append("  └─────────────────────┘")
+        lines.append("=" * 60)
+
+        report = "\n".join(lines)
+        print(report)
+        return report

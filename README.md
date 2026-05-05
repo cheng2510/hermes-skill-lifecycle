@@ -1,193 +1,171 @@
-# 🧠 Hermes Agent 技能生命周期管理系统
+# 🧬 Hermes Agent Skill Lifecycle Manager
 
-## 项目概述
+> 解决 Hermes Agent 技能系统"只生不养"的系统性问题
 
-Hermes Agent 技能生命周期管理系统是一个完整的技能管理平台，解决了 Hermes Agent 当前面临的技能管理难题：89个技能缺乏使用追踪、健康评分、冲突检测和自动清理机制。本系统实现了技能从"出生到死亡"的全生命周期管理。
+## 问题背景
 
-## 核心问题
-
-| 问题 | 描述 | 解决方案 |
-|------|------|----------|
-| 无使用追踪 | 技能被加载但从未记录使用情况 | SQLite 使用事件日志 |
-| 无健康评分 | 无法判断技能质量 | 多维度健康评分算法 |
-| 无冲突检测 | 相似/重复技能共存 | Levenshtein + TF-IDF 检测 |
-| 无自动清理 | 技能"只生不死" | 健康驱动的自动清理 |
-| 无依赖管理 | 技能间关系不明确 | 依赖图构建与分析 |
-
-## 系统架构
+Hermes Agent 的 Skill 系统存在以下核心问题：
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Hermes 技能生命周期管理系统                       │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  ┌──────────┐    ┌──────────────┐    ┌───────────────┐          │
-│  │ CLI 工具  │───▶│  技能注册表   │───▶│  Web 仪表板    │          │
-│  └──────────┘    └──────┬───────┘    └───────────────┘          │
-│                         │                                       │
-│         ┌───────────────┼───────────────┐                       │
-│         ▼               ▼               ▼                       │
-│  ┌────────────┐  ┌─────────────┐  ┌──────────────┐             │
-│  │ 冲突检测器  │  │ 使用追踪器   │  │ 自动清理器    │             │
-│  └─────┬──────┘  └──────┬──────┘  └──────┬───────┘             │
-│        │                │                │                      │
-│        ▼                ▼                ▼                      │
-│  ┌─────────┐     ┌──────────┐     ┌──────────┐                 │
-│  │相似度分析│     │SQLite DB │     │健康评分   │                 │
-│  │标签碰撞  │     │统计聚合   │     │分级分类   │                 │
-│  │触发词冲突│     │趋势分析   │     │干运行模式  │                 │
-│  └─────────┘     └──────────┘     └──────────┘                 │
-│                                                                 │
-│  ┌─────────────────────────────────────────────────────────┐    │
-│  │              ~/.hermes/skills/ 目录结构                    │    │
-│  │  ┌──────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐     │    │
-│  │  │ skill│  │ SKILL.md │  │ metadata │  │ usage.db │     │    │
-│  │  │ dirs │  │ frontmat │  │  .json   │  │          │     │    │
-│  │  └──────┘  └──────────┘  └──────────┘  └──────────┘     │    │
-│  └─────────────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                   当前 Skill 生态现状                      │
+├─────────────────────────────────────────────────────────┤
+│  ❌ 技能只增不减 — 没有淘汰机制                             │
+│  ❌ 无使用追踪 — 不知道哪些技能有用                          │
+│  ❌ 无冲突检测 — 功能重叠的技能互相争抢                       │
+│  ❌ 无健康评估 — 坏掉的技能照样被加载                         │
+│  ❌ 无分层管理 — 89个技能平铺，核心技能被淹没                  │
+└─────────────────────────────────────────────────────────┘
 ```
 
-## 技能分级体系
+## 解决方案架构
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                   技能分级金字塔                        │
-│                                                     │
-│                    ┌───────┐                         │
-│                    │ 核心层 │  ← 高健康分、高频使用     │
-│                   ─┤       ├─                       │
-│                  / └───────┘ \                       │
-│                ┌──────────────┐                      │
-│                │   候选层      │  ← 中等健康分          │
-│               ─┤              ├─                     │
-│              / └──────────────┘ \                    │
-│            ┌──────────────────────┐                  │
-│            │      已废弃层         │  ← 低健康分        │
-│            └──────────────────────┘                  │
-└─────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│                    Skill Lifecycle Manager                      │
+├──────────┬──────────┬──────────┬──────────┬──────────────────┤
+│ Registry │ Conflict │  Usage   │  Auto    │   Web Dashboard  │
+│  Engine  │ Detector │ Tracker  │  Pruner  │   (可选)         │
+├──────────┴──────────┴──────────┴──────────┴──────────────────┤
+│                    SQLite 数据层                               │
+├──────────────────────────────────────────────────────────────┤
+│              ~/.hermes/skills/ 文件系统                        │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-## 安装
+## 核心功能
+
+### 1. 技能健康度评分 (Skill Health Scoring)
+
+基于多维度指标计算每个技能的健康分（0-100）：
+
+| 指标 | 权重 | 说明 |
+|------|------|------|
+| 使用频率 | 30% | 最近30天被调用的次数 |
+| 成功率 | 25% | 调用成功/总调用比 |
+| 新鲜度 | 20% | 最后一次使用距今天数 |
+| 依赖度 | 15% | 被其他技能引用的次数 |
+| 文档完整度 | 10% | frontmatter 字段完整性和文档长度 |
+
+### 2. 技能分层 (Skill Tiering)
+
+```
+┌─────────────┐
+│  核心技能    │ ← 健康分 ≥ 80，高频使用
+│  (Core)     │
+├─────────────┤
+│  候选技能    │ ← 健康分 60-79，有潜力
+│ (Candidate) │
+├─────────────┤
+│  观察技能    │ ← 健康分 40-59，需要关注
+│ (Watch)     │
+├─────────────┤
+│  待淘汰技能  │ ← 健康分 < 40，建议清理
+│(Deprecated) │
+└─────────────┘
+```
+
+### 3. 冲突检测 (Conflict Detection)
+
+- **名称相似度**：Levenshtein 距离检测相似命名
+- **描述重叠度**：TF-IDF 余弦相似度检测功能重复
+- **标签碰撞**：检测 tag 集合的 Jaccard 相似度
+- **触发词冲突**：检测 When to Use 部分的关键词重叠
+
+### 4. 使用追踪 (Usage Tracking)
+
+- SQLite 存储每次技能调用事件
+- 统计聚合：日/周/月维度
+- 趋势分析：识别上升/下降趋势
+
+### 5. 自动清理 (Auto Pruning)
+
+- 可配置的阈值（天数、失败率等）
+- Dry-run 模式：只报告不执行
+- 安全确认：高危操作需二次确认
+
+## 快速开始
+
+### 安装
 
 ```bash
-# 克隆仓库
 git clone https://github.com/cheng2510/hermes-skill-lifecycle.git
 cd hermes-skill-lifecycle
-
-# 安装依赖
 pip install -r requirements.txt
-
-# 安装为包
-pip install -e .
 ```
 
-## 使用方法
-
-### CLI 命令
+### 使用
 
 ```bash
-# 全面扫描技能生态系统
-hermes-skills scan
+# 扫描所有技能，生成健康报告
+python -m src.cli scan
 
-# 生成健康报告
-hermes-skills health
-
-# 检测技能冲突
-hermes-skills conflicts
-
-# 获取清理建议（干运行模式）
-hermes-skills prune --dry-run
-
-# 执行清理
-hermes-skills prune --execute
+# 查看冲突检测结果
+python -m src.cli conflicts
 
 # 查看使用统计
-hermes-skills stats
-hermes-skills stats --skill <skill-name>
+python -m src.cli stats
+
+# 生成清理建议（dry-run）
+python -m src.cli prune --dry-run
+
+# 启动 Web 仪表盘
+python -m src.web_dashboard
 ```
 
-### Web 仪表板
+### 集成到 Hermes Agent
 
-```bash
-# 启动 Web 仪表板
-hermes-skills dashboard --port 5000
+将以下代码加入你的 Hermes Agent 配置：
 
-# 访问 http://localhost:5000
+```python
+# 在 skill_manage 后自动触发健康检查
+from src.skill_registry import SkillRegistry
+registry = SkillRegistry()
+registry.scan_all()
+registry.generate_report()
 ```
 
-## 健康评分算法
-
-每个技能的健康分数 (0-100) 由以下维度加权计算：
-
-```
-健康分 = (使用频率 × 0.30) + (成功率 × 0.25) + (新鲜度 × 0.25) + (依赖质量 × 0.20)
-```
-
-| 维度 | 权重 | 计算方式 |
-|------|------|----------|
-| 使用频率 | 30% | 近30天使用次数归一化 |
-| 成功率 | 25% | 成功执行次数/总执行次数 |
-| 新鲜度 | 25% | 最后使用时间衰减函数 |
-| 依赖质量 | 20% | 依赖数量和健康度 |
-
-## 冲突检测
-
-系统通过四种方式检测技能间冲突：
-
-1. **名称相似度** - Levenshtein 编辑距离，阈值 0.8
-2. **描述重叠** - TF-IDF 向量化 + 余弦相似度，阈值 0.7
-3. **标签碰撞** - 集合交集检测
-4. **触发词冲突** - 相同关键词触发不同技能
-
-## 目录结构
+## 项目结构
 
 ```
 hermes-skill-lifecycle/
-├── README.md                    # 本文件
-├── requirements.txt             # Python 依赖
-├── setup.py                     # 包安装配置
-├── .github/
-│   └── workflows/
-│       └── ci.yml              # GitHub Actions CI
+├── README.md                 # 本文件
+├── requirements.txt          # Python 依赖
 ├── src/
 │   ├── __init__.py
-│   ├── skill_registry.py       # 核心注册表
-│   ├── conflict_detector.py    # 冲突检测器
-│   ├── usage_tracker.py        # 使用追踪器
-│   ├── auto_pruner.py          # 自动清理器
-│   ├── cli.py                  # CLI 接口
-│   └── web_dashboard.py        # Web 仪表板
-└── tests/
-    ├── __init__.py
-    ├── test_registry.py
-    ├── test_conflict.py
-    ├── test_tracker.py
-    └── test_pruner.py
+│   ├── cli.py               # CLI 入口
+│   ├── skill_registry.py    # 核心注册表 + 健康评分
+│   ├── conflict_detector.py # 冲突检测引擎
+│   ├── usage_tracker.py     # 使用追踪 + SQLite
+│   ├── auto_pruner.py       # 自动清理建议
+│   └── web_dashboard.py     # Web 仪表盘（可选）
+├── tests/
+│   ├── __init__.py
+│   ├── test_registry.py
+│   ├── test_conflict.py
+│   └── test_pruner.py
+└── .github/
+    └── workflows/
+        └── ci.yml           # GitHub Actions CI
 ```
 
-## 开发
+## 设计理念
 
-```bash
-# 运行测试
-pytest tests/ -v
+本项目参考了以下成熟方案：
 
-# 运行带覆盖率的测试
-pytest tests/ -v --cov=src --cov-report=html
+- **tech-leads-club/agent-skills** (2.3k⭐)：锁文件机制 + CI 验证
+- **NousResearch/hermes-agent-self-evolution** (2.7k⭐)：进化式优化
+- **rscheiwe/open-skills**：全生命周期管理
+- **Dicklesworthstone/meta_skill**：多臂老虎机算法优化技能推荐
+- **IBM/mcp-context-forge**：企业级注册表模式
 
-# 代码风格检查
-flake8 src/ tests/
-black --check src/ tests/
-```
+但不是照搬，而是因地制宜：
 
-## 许可证
+1. **不引入外部依赖**：不强制安装 DSPy/GEPA，用纯 Python 实现
+2. **兼容现有格式**：直接读取 Hermes 的 SKILL.md frontmatter
+3. **渐进式采用**：可以只用扫描功能，不强制启用自动清理
+4. **本地优先**：所有数据存储在本地 SQLite，不上传云端
 
-MIT License
+## License
 
-## 致谢
-
-- [tech-leads-club/agent-skills](https://github.com/tech-leads-club/agent-skills) - 锁文件注册表模式
-- [NousResearch/hermes-agent-self-evolution](https://github.com/NousResearch/hermes-agent-self-evolution) - 进化优化
-- [rscheiwe/open-skills](https://github.com/rscheiwe/open-skills) - 生命周期管理
-- [Dicklesworthstone/meta_skill](https://github.com/Dicklesworthstone/meta_skill) - 多臂老虎机建议
-- [IBM/mcp-context-forge](https://github.com/IBM/mcp-context-forge) - 企业级网关注册
+MIT

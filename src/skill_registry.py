@@ -1,370 +1,317 @@
 """
-技能注册表 - 核心模块
+技能注册表 + 健康度评分引擎
 
-负责解析 SKILL.md 文件的 frontmatter，管理技能元数据，
-计算健康评分，以及对技能进行分级分类。
+核心职责：
+1. 扫描 ~/.hermes/skills/ 目录，解析所有 SKILL.md
+2. 计算每个技能的健康度评分（0-100）
+3. 将技能分为核心/候选/观察/待淘汰四个层级
+4. 生成生态健康报告
 """
 
 import os
 import re
-import json
 import yaml
-import logging
+import sqlite3
 from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Optional
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
-from dataclasses import dataclass, field, asdict
-from enum import Enum
-
-logger = logging.getLogger(__name__)
-
-
-class SkillTier(Enum):
-    """技能分级枚举"""
-    CORE = "core"           # 核心层: 健康分 >= 80
-    CANDIDATE = "candidate"  # 候选层: 40 <= 健康分 < 80
-    DEPRECATED = "deprecated"  # 已废弃: 健康分 < 40
 
 
 @dataclass
-class SkillMetadata:
-    """技能元数据结构"""
+class SkillMeta:
+    """技能元数据"""
     name: str
     description: str
     version: str = "1.0.0"
-    author: str = ""
-    tags: List[str] = field(default_factory=list)
-    triggers: List[str] = field(default_factory=list)
-    dependencies: List[str] = field(default_factory=list)
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-    tier: SkillTier = SkillTier.CANDIDATE
+    author: str = "unknown"
+    tags: list = field(default_factory=list)
+    related_skills: list = field(default_factory=list)
+    category: str = ""
+    file_path: str = ""
+    # 运行时计算
     health_score: float = 0.0
-    path: str = ""
-
-    def to_dict(self) -> Dict:
-        """转换为字典"""
-        result = asdict(self)
-        result['tier'] = self.tier.value
-        if self.created_at:
-            result['created_at'] = self.created_at.isoformat()
-        if self.updated_at:
-            result['updated_at'] = self.updated_at.isoformat()
-        return result
+    tier: str = "unknown"
+    usage_count_30d: int = 0
+    success_rate: float = 0.0
+    last_used_days_ago: int = -1
+    doc_length: int = 0
+    has_when_to_use: bool = False
+    has_pitfalls: bool = False
+    has_verification: bool = False
 
 
 class SkillRegistry:
-    """技能注册表核心类"""
+    """技能注册表"""
 
-    # 健康评分权重配置
-    HEALTH_WEIGHTS = {
-        'usage_frequency': 0.30,
-        'success_rate': 0.25,
-        'recency': 0.25,
-        'dependency_quality': 0.20
+    TIERS = {
+        "core": (80, 100, "🟢 核心技能"),
+        "candidate": (60, 79, "🔵 候选技能"),
+        "watch": (40, 59, "🟡 观察技能"),
+        "deprecated": (0, 39, "🔴 待淘汰技能"),
     }
 
-    # 分级阈值
-    TIER_THRESHOLDS = {
-        SkillTier.CORE: 80,
-        SkillTier.CANDIDATE: 40,
-        SkillTier.DEPRECATED: 0
+    # 健康度权重
+    WEIGHTS = {
+        "usage_frequency": 0.30,
+        "success_rate": 0.25,
+        "freshness": 0.20,
+        "dependency": 0.15,
+        "doc_completeness": 0.10,
     }
 
-    def __init__(self, skills_dir: Optional[str] = None):
-        """
-        初始化技能注册表
+    def __init__(self, skills_dir: str = None, db_path: str = None):
+        self.skills_dir = Path(skills_dir or os.path.expanduser("~/.hermes/skills"))
+        self.db_path = Path(db_path or os.path.expanduser("~/.hermes/skill_lifecycle.db"))
+        self.skills: dict[str, SkillMeta] = {}
 
-        Args:
-            skills_dir: 技能目录路径，默认 ~/.hermes/skills/
-        """
-        if skills_dir is None:
-            skills_dir = os.path.expanduser("~/.hermes/skills")
+    def scan_all(self) -> dict[str, SkillMeta]:
+        """扫描所有技能目录，解析 SKILL.md"""
+        self.skills.clear()
 
-        self.skills_dir = Path(skills_dir)
-        self.skills: Dict[str, SkillMetadata] = {}
-        self._usage_data: Dict[str, Dict] = {}
-
-    def parse_skill_md(self, skill_path: Path) -> Optional[SkillMetadata]:
-        """
-        解析 SKILL.md 文件，提取 frontmatter 元数据
-
-        Args:
-            skill_path: 技能目录路径
-
-        Returns:
-            SkillMetadata 对象，解析失败返回 None
-        """
-        skill_md = skill_path / "SKILL.md"
-        if not skill_md.exists():
-            logger.warning(f"技能目录 {skill_path} 缺少 SKILL.md 文件")
-            return None
-
-        try:
-            content = skill_md.read_text(encoding='utf-8')
-            return self._parse_frontmatter(content, skill_path)
-        except Exception as e:
-            logger.error(f"解析 {skill_md} 失败: {e}")
-            return None
-
-    def _parse_frontmatter(self, content: str, skill_path: Path) -> Optional[SkillMetadata]:
-        """
-        解析 Markdown frontmatter
-
-        Args:
-            content: SKILL.md 文件内容
-            skill_path: 技能目录路径
-
-        Returns:
-            SkillMetadata 对象
-        """
-        # 匹配 YAML frontmatter
-        frontmatter_match = re.match(r'^---\s*\n(.*?)\n---\s*\n', content, re.DOTALL)
-        
-        if not frontmatter_match:
-            logger.warning(f"技能 {skill_path.name} 的 SKILL.md 缺少 frontmatter")
-            return SkillMetadata(
-                name=skill_path.name,
-                description="",
-                path=str(skill_path)
-            )
-
-        try:
-            metadata = yaml.safe_load(frontmatter_match.group(1))
-            if not isinstance(metadata, dict):
-                metadata = {}
-        except yaml.YAMLError as e:
-            logger.error(f"YAML 解析错误: {e}")
-            metadata = {}
-
-        return SkillMetadata(
-            name=metadata.get('name', skill_path.name),
-            description=metadata.get('description', ''),
-            version=metadata.get('version', '1.0.0'),
-            author=metadata.get('author', ''),
-            tags=metadata.get('tags', []),
-            triggers=metadata.get('triggers', []),
-            dependencies=metadata.get('dependencies', []),
-            created_at=self._parse_datetime(metadata.get('created_at')),
-            updated_at=self._parse_datetime(metadata.get('updated_at')),
-            path=str(skill_path)
-        )
-
-    def _parse_datetime(self, dt_str: Optional[str]) -> Optional[datetime]:
-        """解析日期时间字符串"""
-        if not dt_str:
-            return None
-        if isinstance(dt_str, datetime):
-            return dt_str
-        try:
-            return datetime.fromisoformat(str(dt_str))
-        except (ValueError, TypeError):
-            return None
-
-    def scan_skills(self) -> Dict[str, SkillMetadata]:
-        """
-        扫描技能目录，加载所有技能
-
-        Returns:
-            技能名称到元数据的映射字典
-        """
         if not self.skills_dir.exists():
-            logger.warning(f"技能目录不存在: {self.skills_dir}")
+            print(f"[!] 技能目录不存在: {self.skills_dir}")
             return self.skills
 
-        for item in self.skills_dir.iterdir():
-            if item.is_dir() and not item.name.startswith('.'):
-                metadata = self.parse_skill_md(item)
-                if metadata:
-                    self.skills[metadata.name] = metadata
-                    logger.info(f"加载技能: {metadata.name} v{metadata.version}")
+        for skill_file in self.skills_dir.rglob("SKILL.md"):
+            try:
+                meta = self._parse_skill_file(skill_file)
+                if meta:
+                    self.skills[meta.name] = meta
+            except Exception as e:
+                print(f"[!] 解析失败 {skill_file}: {e}")
 
-        logger.info(f"共加载 {len(self.skills)} 个技能")
+        # 加载使用数据
+        self._load_usage_data()
+
+        # 计算健康度
+        for skill in self.skills.values():
+            skill.health_score = self._calculate_health(skill)
+            skill.tier = self._classify_tier(skill.health_score)
+
         return self.skills
 
-    def update_usage_data(self, usage_data: Dict[str, Dict]):
-        """
-        更新使用数据，用于健康评分计算
+    def _parse_skill_file(self, path: Path) -> Optional[SkillMeta]:
+        """解析单个 SKILL.md 文件"""
+        content = path.read_text(encoding="utf-8")
 
-        Args:
-            usage_data: 技能使用数据字典
-        """
-        self._usage_data = usage_data
+        if not content.startswith("---"):
+            return None
 
-    def calculate_health_score(self, skill_name: str) -> float:
-        """
-        计算技能健康评分 (0-100)
+        # 提取 frontmatter
+        match = re.search(r"\n---\s*\n", content[3:])
+        if not match:
+            return None
 
-        健康分 = (使用频率 × 0.30) + (成功率 × 0.25) + (新鲜度 × 0.25) + (依赖质量 × 0.20)
+        fm_text = content[3:match.start() + 3]
+        try:
+            fm = yaml.safe_load(fm_text)
+        except yaml.YAMLError:
+            return None
 
-        Args:
-            skill_name: 技能名称
+        if not isinstance(fm, dict):
+            return None
 
-        Returns:
-            健康评分，0-100
-        """
-        if skill_name not in self.skills:
-            return 0.0
+        name = fm.get("name", "")
+        description = fm.get("description", "")
 
-        skill = self.skills[skill_name]
-        usage = self._usage_data.get(skill_name, {})
+        if not name or not description:
+            return None
 
-        # 计算各维度分数
-        usage_freq = self._calculate_usage_frequency(usage)
-        success_rate = self._calculate_success_rate(usage)
-        recency = self._calculate_recency_score(usage)
-        dep_quality = self._calculate_dependency_quality(skill)
+        # 提取 metadata
+        metadata = fm.get("metadata", {})
+        hermes = metadata.get("hermes", {}) if isinstance(metadata, dict) else {}
 
-        # 加权计算总分
-        score = (
-            usage_freq * self.HEALTH_WEIGHTS['usage_frequency'] +
-            success_rate * self.HEALTH_WEIGHTS['success_rate'] +
-            recency * self.HEALTH_WEIGHTS['recency'] +
-            dep_quality * self.HEALTH_WEIGHTS['dependency_quality']
+        # 推断 category
+        parts = path.parts
+        category = ""
+        for i, part in enumerate(parts):
+            if part == "skills" and i + 1 < len(parts) - 1:
+                category = parts[i + 1]
+                break
+
+        body = content[match.end() + 3:]
+
+        return SkillMeta(
+            name=name,
+            description=description,
+            version=fm.get("version", "1.0.0"),
+            author=fm.get("author", "unknown"),
+            tags=hermes.get("tags", []),
+            related_skills=hermes.get("related_skills", []),
+            category=category,
+            file_path=str(path),
+            doc_length=len(body),
+            has_when_to_use=bool(re.search(r"#+\s*(When to Use|触发条件)", body, re.I)),
+            has_pitfalls=bool(re.search(r"#+\s*(Pitfalls|常见问题|踩坑)", body, re.I)),
+            has_verification=bool(re.search(r"#+\s*(Verification|验证|Checklist)", body, re.I)),
         )
 
-        skill.health_score = round(min(100.0, max(0.0, score)), 2)
-        return skill.health_score
+    def _load_usage_data(self):
+        """从 SQLite 加载使用数据"""
+        if not self.db_path.exists():
+            return
 
-    def _calculate_usage_frequency(self, usage: Dict) -> float:
-        """
-        计算使用频率分数 (0-100)
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
 
-        基于近30天使用次数归一化计算
-        """
-        recent_count = usage.get('recent_count', 0)
-        # 使用对数缩放，100次以上为满分
-        if recent_count <= 0:
-            return 0.0
-        return min(100.0, (recent_count / 100.0) * 100)
+        try:
+            # 检查表是否存在
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='usage_events'")
+            if not cursor.fetchone():
+                return
 
-    def _calculate_success_rate(self, usage: Dict) -> float:
-        """
-        计算成功率分数 (0-100)
+            thirty_days_ago = (datetime.now() - timedelta(days=30)).isoformat()
 
-        成功率 = 成功执行次数 / 总执行次数
-        """
-        total = usage.get('total_count', 0)
-        if total <= 0:
-            return 50.0  # 无数据时给中等分数
+            for skill in self.skills.values():
+                # 30天使用次数
+                cursor.execute(
+                    "SELECT COUNT(*) FROM usage_events WHERE skill_name=? AND timestamp>=?",
+                    (skill.name, thirty_days_ago)
+                )
+                skill.usage_count_30d = cursor.fetchone()[0]
 
-        success = usage.get('success_count', 0)
-        return (success / total) * 100
+                # 成功率
+                cursor.execute(
+                    "SELECT COUNT(*) as total, SUM(CASE WHEN success=1 THEN 1 ELSE 0 END) as ok "
+                    "FROM usage_events WHERE skill_name=?",
+                    (skill.name,)
+                )
+                row = cursor.fetchone()
+                if row[0] > 0:
+                    skill.success_rate = row[1] / row[0]
 
-    def _calculate_recency_score(self, usage: Dict) -> float:
-        """
-        计算新鲜度分数 (0-100)
+                # 最后使用时间
+                cursor.execute(
+                    "SELECT MAX(timestamp) FROM usage_events WHERE skill_name=?",
+                    (skill.name,)
+                )
+                last = cursor.fetchone()[0]
+                if last:
+                    last_dt = datetime.fromisoformat(last)
+                    skill.last_used_days_ago = (datetime.now() - last_dt).days
 
-        使用指数衰减函数，最后使用时间越近分数越高
-        """
-        last_used = usage.get('last_used')
-        if not last_used:
-            return 30.0  # 无使用记录给较低分
+        except sqlite3.Error as e:
+            print(f"[!] 数据库读取错误: {e}")
+        finally:
+            conn.close()
 
-        if isinstance(last_used, str):
-            try:
-                last_used = datetime.fromisoformat(last_used)
-            except (ValueError, TypeError):
-                return 30.0
+    def _calculate_health(self, skill: SkillMeta) -> float:
+        """计算技能健康度评分（0-100）"""
+        scores = {}
 
-        days_since = (datetime.now() - last_used).days
-        # 指数衰减: 7天内满分，30天后降为约25分
-        return max(0.0, 100.0 * (0.95 ** days_since))
-
-    def _calculate_dependency_quality(self, skill: SkillMetadata) -> float:
-        """
-        计算依赖质量分数 (0-100)
-
-        考虑依赖数量和依赖技能的健康度
-        """
-        deps = skill.dependencies
-        if not deps:
-            return 80.0  # 无依赖给较高分
-
-        # 依赖数量惩罚: 超过5个依赖开始扣分
-        count_penalty = max(0, (len(deps) - 5) * 10)
-
-        # 依赖健康度: 计算依赖技能的平均健康分
-        dep_scores = []
-        for dep_name in deps:
-            if dep_name in self.skills:
-                dep_scores.append(self.skills[dep_name].health_score)
-
-        avg_dep_score = sum(dep_scores) / len(dep_scores) if dep_scores else 50.0
-
-        return max(0.0, avg_dep_score - count_penalty)
-
-    def classify_tier(self, skill_name: str) -> SkillTier:
-        """
-        对技能进行分级分类
-
-        Args:
-            skill_name: 技能名称
-
-        Returns:
-            技能分级 (core/candidate/deprecated)
-        """
-        if skill_name not in self.skills:
-            return SkillTier.DEPRECATED
-
-        score = self.skills[skill_name].health_score
-
-        if score >= self.TIER_THRESHOLDS[SkillTier.CORE]:
-            return SkillTier.CORE
-        elif score >= self.TIER_THRESHOLDS[SkillTier.CANDIDATE]:
-            return SkillTier.CANDIDATE
+        # 1. 使用频率（30天内调用次数，归一化到0-100）
+        # 0次=0, 1-5次=40, 6-20次=70, 20+=100
+        count = skill.usage_count_30d
+        if count == 0:
+            scores["usage_frequency"] = 0
+        elif count <= 5:
+            scores["usage_frequency"] = 40
+        elif count <= 20:
+            scores["usage_frequency"] = 70
         else:
-            return SkillTier.DEPRECATED
+            scores["usage_frequency"] = 100
 
-    def update_all_health_scores(self):
-        """更新所有技能的健康评分和分级"""
-        for skill_name in self.skills:
-            self.calculate_health_score(skill_name)
-            tier = self.classify_tier(skill_name)
-            self.skills[skill_name].tier = tier
+        # 2. 成功率
+        scores["success_rate"] = skill.success_rate * 100
 
-    def get_skill_report(self) -> Dict:
-        """
-        生成技能报告
+        # 3. 新鲜度（越近越好）
+        days = skill.last_used_days_ago
+        if days < 0:
+            scores["freshness"] = 30  # 从未使用，给个基础分
+        elif days <= 7:
+            scores["freshness"] = 100
+        elif days <= 30:
+            scores["freshness"] = 70
+        elif days <= 90:
+            scores["freshness"] = 40
+        else:
+            scores["freshness"] = 10
 
-        Returns:
-            包含统计信息的报告字典
-        """
-        self.update_all_health_scores()
+        # 4. 依赖度（被其他技能引用的次数）
+        ref_count = sum(
+            1 for s in self.skills.values()
+            if skill.name in s.related_skills
+        )
+        scores["dependency"] = min(ref_count * 25, 100)
 
-        tiers = {t: [] for t in SkillTier}
-        for name, skill in self.skills.items():
-            tiers[skill.tier].append(name)
+        # 5. 文档完整度
+        doc_score = 0
+        if skill.doc_length > 500:
+            doc_score += 30
+        if skill.has_when_to_use:
+            doc_score += 25
+        if skill.has_pitfalls:
+            doc_score += 25
+        if skill.has_verification:
+            doc_score += 20
+        scores["doc_completeness"] = doc_score
 
-        return {
-            'total_skills': len(self.skills),
-            'tier_distribution': {t.value: len(n) for t, n in tiers.items()},
-            'tier_skills': {t.value: n for t, n in tiers.items()},
-            'skills': {name: skill.to_dict() for name, skill in self.skills.items()},
-            'average_health': sum(s.health_score for s in self.skills.values()) / max(1, len(self.skills))
-        }
+        # 加权求和
+        total = sum(
+            scores[key] * weight
+            for key, weight in self.WEIGHTS.items()
+        )
 
-    def export_metadata(self, output_path: str):
-        """导出元数据到 JSON 文件"""
-        report = self.get_skill_report()
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
-        logger.info(f"元数据已导出到 {output_path}")
+        return round(total, 1)
 
-    def get_skill(self, name: str) -> Optional[SkillMetadata]:
-        """获取技能元数据"""
+    def _classify_tier(self, score: float) -> str:
+        """根据健康分分类层级"""
+        for tier_name, (low, high, _) in self.TIERS.items():
+            if low <= score <= high:
+                return tier_name
+        return "deprecated"
+
+    def generate_report(self) -> str:
+        """生成生态健康报告"""
+        if not self.skills:
+            self.scan_all()
+
+        lines = []
+        lines.append("=" * 60)
+        lines.append("  Hermes Agent 技能生态健康报告")
+        lines.append("=" * 60)
+        lines.append(f"  扫描时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(f"  技能总数: {len(self.skills)}")
+        lines.append("")
+
+        # 分层统计
+        tier_counts = {t: 0 for t in self.TIERS}
+        for skill in self.skills.values():
+            tier_counts[skill.tier] = tier_counts.get(skill.tier, 0) + 1
+
+        lines.append("  ┌─────────────┬───────┐")
+        lines.append("  │ 层级         │ 数量  │")
+        lines.append("  ├─────────────┼───────┤")
+        for tier_name, (_, _, label) in self.TIERS.items():
+            count = tier_counts.get(tier_name, 0)
+            lines.append(f"  │ {label:<10} │ {count:>5} │")
+        lines.append("  └─────────────┴───────┘")
+        lines.append("")
+
+        # 按健康分排序
+        sorted_skills = sorted(self.skills.values(), key=lambda s: s.health_score, reverse=True)
+
+        lines.append("  技能健康度排行:")
+        lines.append("  " + "-" * 56)
+        for i, skill in enumerate(sorted_skills, 1):
+            tier_label = self.TIERS[skill.tier][2] if skill.tier in self.TIERS else "❓"
+            bar_len = int(skill.health_score / 5)
+            bar = "█" * bar_len + "░" * (20 - bar_len)
+            lines.append(
+                f"  {i:>2}. [{tier_label}] {skill.health_score:>5.1f} "
+                f"|{bar}| {skill.name}"
+            )
+
+        lines.append("")
+        lines.append("=" * 60)
+
+        report = "\n".join(lines)
+        print(report)
+        return report
+
+    def get_skill(self, name: str) -> Optional[SkillMeta]:
         return self.skills.get(name)
 
-    def list_skills(self, tier: Optional[SkillTier] = None) -> List[SkillMetadata]:
-        """
-        列出技能
-
-        Args:
-            tier: 可选的分级过滤
-
-        Returns:
-            技能列表
-        """
-        if tier:
-            return [s for s in self.skills.values() if s.tier == tier]
-        return list(self.skills.values())
+    def list_by_tier(self, tier: str) -> list[SkillMeta]:
+        return [s for s in self.skills.values() if s.tier == tier]

@@ -1,280 +1,169 @@
 """
-自动清理器
+自动清理建议引擎
 
-基于健康评分自动清理低质量技能，支持干运行模式。
+基于健康度评分和使用数据，生成清理建议。
+支持 dry-run 模式，不会实际删除任何文件。
 """
 
-import os
-import shutil
-import logging
-from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional
 from dataclasses import dataclass
-
-from .skill_registry import SkillRegistry, SkillMetadata, SkillTier
-
-logger = logging.getLogger(__name__)
+from .skill_registry import SkillRegistry, SkillMeta
 
 
 @dataclass
 class PruneAction:
-    """清理动作记录"""
+    """清理动作"""
     skill_name: str
-    action: str  # deprecate, archive, remove
+    action: str        # deprecate|remove|merge
     reason: str
+    severity: str      # safe|caution|danger
     health_score: float
-    last_used: Optional[str] = None
+    related_skills: list
 
 
 class AutoPruner:
     """自动清理器"""
 
-    # 默认配置
-    DEFAULT_CONFIG = {
-        'stale_days': 90,          # 超过多少天未使用视为过时
-        'deprecate_threshold': 40,  # 健康分低于此值标记为废弃
-        'remove_threshold': 20,     # 健康分低于此值建议删除
-        'archive_before_remove': True,  # 删除前是否归档
-        'archive_dir': '~/.hermes/archived_skills'  # 归档目录
-    }
-
-    def __init__(self, registry: SkillRegistry, config: Optional[Dict] = None):
-        """
-        初始化清理器
-
-        Args:
-            registry: 技能注册表
-            config: 清理配置
-        """
+    def __init__(self, registry: SkillRegistry):
         self.registry = registry
-        self.config = {**self.DEFAULT_CONFIG, **(config or {})}
-        self.actions: List[PruneAction] = []
 
-    def analyze(self) -> List[PruneAction]:
-        """
-        分析技能，生成清理建议
+    def analyze(self) -> list[PruneAction]:
+        """分析并生成清理建议"""
+        actions = []
 
-        Returns:
-            清理动作列表
-        """
-        self.actions = []
-        self.registry.update_all_health_scores()
+        for skill in self.registry.skills.values():
+            # 健康度过低 → 建议淘汰
+            if skill.health_score < 30:
+                actions.append(PruneAction(
+                    skill_name=skill.name,
+                    action="deprecate",
+                    reason=f"健康度过低 ({skill.health_score:.1f}/100)",
+                    severity="safe",
+                    health_score=skill.health_score,
+                    related_skills=skill.related_skills,
+                ))
 
-        for name, skill in self.registry.skills.items():
-            action = self._analyze_skill(name, skill)
-            if action:
-                self.actions.append(action)
+            # 长期未使用（90天+）且无依赖 → 建议移除
+            if skill.last_used_days_ago > 90 and not self._has_dependents(skill):
+                actions.append(PruneAction(
+                    skill_name=skill.name,
+                    action="remove",
+                    reason=f"超过 {skill.last_used_days_ago} 天未使用，且无其他技能依赖",
+                    severity="caution" if skill.last_used_days_ago < 180 else "safe",
+                    health_score=skill.health_score,
+                    related_skills=skill.related_skills,
+                ))
 
-        logger.info(f"分析完成，建议 {len(self.actions)} 个清理动作")
-        return self.actions
+            # 成功率极低 → 建议修复或移除
+            if skill.success_rate < 0.2 and skill.usage_count_30d >= 3:
+                actions.append(PruneAction(
+                    skill_name=skill.name,
+                    action="deprecate",
+                    reason=f"成功率过低 ({skill.success_rate:.0%})，可能已失效",
+                    severity="safe",
+                    health_score=skill.health_score,
+                    related_skills=skill.related_skills,
+                ))
 
-    def _analyze_skill(self, name: str, skill: SkillMetadata) -> Optional[PruneAction]:
-        """
-        分析单个技能
+        # 检测可合并的技能
+        merge_suggestions = self._find_merge_candidates()
+        actions.extend(merge_suggestions)
 
-        Args:
-            name: 技能名称
-            skill: 技能元数据
+        # 去重
+        seen = set()
+        unique_actions = []
+        for a in actions:
+            key = (a.skill_name, a.action)
+            if key not in seen:
+                seen.add(key)
+                unique_actions.append(a)
 
-        Returns:
-            清理动作，不需要清理返回 None
-        """
-        # 检查是否过时
-        if self._is_stale(skill):
-            return PruneAction(
-                skill_name=name,
-                action='deprecate',
-                reason=f"超过 {self.config['stale_days']} 天未使用",
-                health_score=skill.health_score,
-                last_used=str(skill.updated_at)
-            )
+        # 按严重度排序
+        severity_order = {"safe": 0, "caution": 1, "danger": 2}
+        unique_actions.sort(key=lambda a: (severity_order.get(a.severity, 3), a.health_score))
 
-        # 检查健康分是否低于移除阈值
-        if skill.health_score < self.config['remove_threshold']:
-            return PruneAction(
-                skill_name=name,
-                action='remove',
-                reason=f"健康分 {skill.health_score} 低于移除阈值 {self.config['remove_threshold']}",
-                health_score=skill.health_score
-            )
+        return unique_actions
 
-        # 检查健康分是否低于废弃阈值
-        if skill.health_score < self.config['deprecate_threshold']:
-            return PruneAction(
-                skill_name=name,
-                action='deprecate',
-                reason=f"健康分 {skill.health_score} 低于废弃阈值 {self.config['deprecate_threshold']}",
-                health_score=skill.health_score
-            )
-
-        return None
-
-    def _is_stale(self, skill: SkillMetadata) -> bool:
-        """
-        检查技能是否过时
-
-        Args:
-            skill: 技能元数据
-
-        Returns:
-            是否过时
-        """
-        if not skill.updated_at:
-            return False
-
-        stale_threshold = datetime.now() - timedelta(days=self.config['stale_days'])
-        return skill.updated_at < stale_threshold
-
-    def execute(self, dry_run: bool = True) -> Dict:
-        """
-        执行清理动作
-
-        Args:
-            dry_run: 是否为干运行模式
-
-        Returns:
-            执行结果
-        """
-        if not self.actions:
-            self.analyze()
-
-        results = {
-            'total': len(self.actions),
-            'executed': 0,
-            'skipped': 0,
-            'actions': []
-        }
-
-        for action in self.actions:
-            if dry_run:
-                results['actions'].append({
-                    'skill': action.skill_name,
-                    'action': action.action,
-                    'reason': action.reason,
-                    'status': 'dry_run'
-                })
-                logger.info(f"[DRY RUN] {action.skill_name}: {action.action} - {action.reason}")
-            else:
-                success = self._execute_action(action)
-                results['actions'].append({
-                    'skill': action.skill_name,
-                    'action': action.action,
-                    'reason': action.reason,
-                    'status': 'executed' if success else 'failed'
-                })
-                if success:
-                    results['executed'] += 1
-                else:
-                    results['skipped'] += 1
-
-        return results
-
-    def _execute_action(self, action: PruneAction) -> bool:
-        """
-        执行单个清理动作
-
-        Args:
-            action: 清理动作
-
-        Returns:
-            是否成功
-        """
-        skill_path = Path(self.registry.skills[action.skill_name].path)
-        
-        if not skill_path.exists():
-            logger.warning(f"技能路径不存在: {skill_path}")
-            return False
-
-        try:
-            if action.action == 'archive':
-                return self._archive_skill(skill_path, action.skill_name)
-            elif action.action == 'remove':
-                if self.config['archive_before_remove']:
-                    self._archive_skill(skill_path, action.skill_name)
-                return self._remove_skill(skill_path, action.skill_name)
-            elif action.action == 'deprecate':
-                return self._mark_deprecated(skill_path, action.skill_name)
-            else:
-                logger.warning(f"未知动作: {action.action}")
-                return False
-        except Exception as e:
-            logger.error(f"执行动作失败: {e}")
-            return False
-
-    def _archive_skill(self, skill_path: Path, skill_name: str) -> bool:
-        """归档技能"""
-        archive_dir = Path(os.path.expanduser(self.config['archive_dir']))
-        archive_dir.mkdir(parents=True, exist_ok=True)
-
-        archive_path = archive_dir / f"{skill_name}_{datetime.now().strftime('%Y%m%d')}"
-        
-        if archive_path.exists():
-            archive_path = archive_dir / f"{skill_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-        shutil.copytree(skill_path, archive_path)
-        logger.info(f"技能 {skill_name} 已归档到 {archive_path}")
-        return True
-
-    def _remove_skill(self, skill_path: Path, skill_name: str) -> bool:
-        """删除技能"""
-        shutil.rmtree(skill_path)
-        logger.info(f"技能 {skill_name} 已删除")
-        return True
-
-    def _mark_deprecated(self, skill_path: Path, skill_name: str) -> bool:
-        """标记技能为废弃"""
-        skill_md = skill_path / "SKILL.md"
-        if skill_md.exists():
-            content = skill_md.read_text(encoding='utf-8')
-            
-            # 在 frontmatter 中添加 deprecated 标记
-            if 'deprecated:' not in content:
-                content = content.replace(
-                    '---\n',
-                    '---\ndeprecated: true\n',
-                    1
-                )
-                skill_md.write_text(content, encoding='utf-8')
-                logger.info(f"技能 {skill_name} 已标记为废弃")
+    def _has_dependents(self, skill: SkillMeta) -> bool:
+        """检查是否有其他技能依赖此技能"""
+        for other in self.registry.skills.values():
+            if skill.name in other.related_skills:
                 return True
-        
         return False
 
-    def get_prune_report(self) -> Dict:
-        """
-        生成清理报告
+    def _find_merge_candidates(self) -> list[PruneAction]:
+        """找到可以合并的技能对"""
+        from .conflict_detector import ConflictDetector
 
-        Returns:
-            清理报告字典
-        """
-        if not self.actions:
-            self.analyze()
+        detector = ConflictDetector()
+        conflicts = detector.detect_all(self.registry.skills)
 
-        by_action = {}
-        for action in self.actions:
-            by_action.setdefault(action.action, []).append(action.skill_name)
+        merge_candidates = []
+        seen_pairs = set()
 
-        return {
-            'total_actions': len(self.actions),
-            'by_action': {k: len(v) for k, v in by_action.items()},
-            'skills': {
-                'deprecate': by_action.get('deprecate', []),
-                'remove': by_action.get('remove', []),
-                'archive': by_action.get('archive', [])
-            },
-            'details': [
-                {
-                    'skill': a.skill_name,
-                    'action': a.action,
-                    'reason': a.reason,
-                    'health_score': a.health_score
-                }
-                for a in self.actions
-            ]
-        }
+        for c in conflicts:
+            if c.severity == "high" and c.conflict_type in ("description", "name"):
+                pair = tuple(sorted([c.skill_a, c.skill_b]))
+                if pair not in seen_pairs:
+                    seen_pairs.add(pair)
+                    merge_candidates.append(PruneAction(
+                        skill_name=f"{c.skill_a} + {c.skill_b}",
+                        action="merge",
+                        reason=f"{c.detail}，建议合并为一个技能",
+                        severity="caution",
+                        health_score=max(
+                            self.registry.skills.get(c.skill_a, SkillMeta("", "")).health_score,
+                            self.registry.skills.get(c.skill_b, SkillMeta("", "")).health_score,
+                        ),
+                        related_skills=[c.skill_a, c.skill_b],
+                    ))
 
-    def update_config(self, config: Dict):
-        """更新配置"""
-        self.config.update(config)
-        logger.info(f"清理器配置已更新: {config}")
+        return merge_candidates
+
+    def format_report(self, actions: list[PruneAction], dry_run: bool = True) -> str:
+        """格式化清理报告"""
+        lines = []
+        lines.append("=" * 60)
+        mode = "🔍 DRY-RUN 模式（仅报告，不执行）" if dry_run else "⚠️  执行模式"
+        lines.append(f"  技能清理建议 — {mode}")
+        lines.append("=" * 60)
+
+        if not actions:
+            lines.append("  ✅ 当前无需清理的技能")
+            lines.append("=" * 60)
+            return "\n".join(lines)
+
+        action_icons = {"deprecate": "📉", "remove": "🗑️", "merge": "🔗"}
+        action_labels = {"deprecate": "淘汰", "remove": "移除", "merge": "合并"}
+        severity_icons = {"safe": "🟢", "caution": "🟡", "danger": "🔴"}
+
+        for a in actions:
+            icon = action_icons.get(a.action, "❓")
+            label = action_labels.get(a.action, a.action)
+            sev_icon = severity_icons.get(a.severity, "⚪")
+            lines.append(f"  {sev_icon} {icon} [{label}] {a.skill_name}")
+            lines.append(f"     原因: {a.reason}")
+            lines.append(f"     健康分: {a.health_score:.1f}")
+            if a.related_skills:
+                lines.append(f"     关联: {', '.join(a.related_skills)}")
+            lines.append("")
+
+        # 统计
+        deprecate = sum(1 for a in actions if a.action == "deprecate")
+        remove = sum(1 for a in actions if a.action == "remove")
+        merge = sum(1 for a in actions if a.action == "merge")
+
+        lines.append("  ┌─────────────────────────────┐")
+        lines.append(f"  │ 📉 建议淘汰: {deprecate:>3}            │")
+        lines.append(f"  │ 🗑️  建议移除: {remove:>3}            │")
+        lines.append(f"  │ 🔗 建议合并: {merge:>3} 对           │")
+        lines.append("  └─────────────────────────────┘")
+
+        if not dry_run:
+            lines.append("")
+            lines.append("  ⚠️  执行模式尚未实现，请手动处理以上建议")
+
+        lines.append("=" * 60)
+
+        report = "\n".join(lines)
+        print(report)
+        return report

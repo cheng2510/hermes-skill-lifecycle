@@ -1,3 +1,2 @@
-"""Hermes Agent 技能生命周期管理系统"""
-
+"""Hermes Agent Skill Lifecycle Manager"""
 __version__ = "1.0.0"
